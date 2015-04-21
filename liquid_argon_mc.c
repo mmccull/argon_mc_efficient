@@ -85,7 +85,7 @@ int main() {
 	for(iter=0;iter<nIter;iter++) {
 		if (iter%deltaWrite==0) {
 			fprintf(logOut,"Step: %10d Energy: %f\n", iter, energy);
-			printf("Step: %10d Energy: %f\n", iter, energy);
+//			printf("Step: %10d Energy: %f\n", iter, energy);
 			// write positions
 			write_xyz_step(coord,nAtoms,iter, box, xyzOut);
 			// flush buffers
