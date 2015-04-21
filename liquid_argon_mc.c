@@ -5,11 +5,12 @@
 #include "stringlib.h"
 
 // Declare Subroutines
-void read_cfg_file(int *, double *, double *, char *, char *, int *, int *, double *, double *);
+void read_cfg_file(int *, double *, double *, char *, char *, int *, int *, double *, double *, double *, int *);
 void write_xyz_step(double **, int, int, double, FILE *);
 void init_positions(double **, int, double *);
-double total_pair_energy(double **, int, double, double**,double);
-void atom_pair_energy(double **, int, double, int, double *, double);
+void compute_neighbor_list(double **, int, double, double, int**);
+double total_pair_energy(double **, int, double, double**, double, int **);
+void atom_pair_energy(double **, int, double, int, double, double *, int **);
 double lennard_jones(double);
 double sum(double*, int);
 
@@ -47,7 +48,10 @@ int main() {
 	FILE *xyzOut;
 	FILE *logOut;      // log output file
 
-	double rCut2;
+	double rCut2;         // cutoff distance
+	double neighborDist2; // neighbor list distance cutoff (should be bigger than rCut2)
+	int neighborUpdate;  // how often to update the neighbor list
+	int **neighborList;  // neighbor list matrix
 
 	time_t startTime;   // initial clock time
 	time_t stopTime;    // final clock time
@@ -60,7 +64,7 @@ int main() {
 	startTime = clock();
 
 	// read config data from standard in
-	read_cfg_file(&nAtoms, &temp, &box, trajFileName, logFileName, &nIter, &deltaWrite, &deltaX, &rCut2);
+	read_cfg_file(&nAtoms, &temp, &box, trajFileName, logFileName, &nIter, &deltaWrite, &deltaX, &rCut2, &neighborDist2, &neighborUpdate);
 	kBT = kB*temp;
 	printf("kB*T=%f\n",kBT);
 
@@ -68,17 +72,24 @@ int main() {
 	coord = (double**) malloc(nAtoms*sizeof(double*));
 	atomEnergy = (double**) calloc(nAtoms,sizeof(double*));
 	newEnergy = (double*) malloc(nAtoms*sizeof(double));
+	neighborList = (int**) malloc(nAtoms*sizeof(int*));
 	for (i=0;i<nAtoms;i++) {
 		coord[i] = (double*) malloc(3*sizeof(double));
 		atomEnergy[i] = (double*) calloc(nAtoms,sizeof(double));
+		neighborList[i] = (int*) malloc((nAtoms+1)*sizeof(int));
 	}
 	// allocate atom energy array (calloc initializes the memory to zero
 	// initialize particle positions
 	init_positions(coord,nAtoms,&box);
 
-	// Compute energy of system
-	energy = total_pair_energy(coord,nAtoms,box,atomEnergy,rCut2);
+	// compute initial neighbor list
+	compute_neighbor_list(coord,nAtoms,box,neighborDist2,neighborList);
 
+	// Compute energy of system
+	energy = total_pair_energy(coord,nAtoms,box,atomEnergy,rCut2,neighborList);
+	printf("first energy %f\n", energy);
+
+		
 	xyzOut = fopen(trajFileName,"w");
 	logOut = fopen(logFileName,"w");
 
@@ -94,6 +105,9 @@ int main() {
 			fflush(xyzOut);
 			fflush(logOut);
 		}
+		if (iter!=0 && iter%neighborUpdate==0) {
+			compute_neighbor_list(coord,nAtoms,box,neighborDist2,neighborList);
+		}
 
 		// randomly choose a particle to move
 		atom = rand()%nAtoms;
@@ -103,9 +117,9 @@ int main() {
 			delta[i] = deltaX*(rand()/((double) RAND_MAX)-0.5);
 			coord[atom][i] += delta[i];
 		}
-		// compute new energy for specific atom
+		// compute new energy
 		routineStartTime=clock();
-		atom_pair_energy(coord,nAtoms,box,atom,newEnergy,rCut2);
+		atom_pair_energy(coord,nAtoms,box,atom,rCut2,newEnergy,neighborList);
 		routineStopTime=clock();
 		energyCalcTime += (double)(routineStopTime-routineStartTime)/CLOCKS_PER_SEC;
 
@@ -151,6 +165,51 @@ int main() {
 // Subroutines
 //
 
+
+void compute_neighbor_list(double **coord, int nAtoms, double box, double neighborDist2, int **neighborList) {
+
+	int atom1;
+	int atom2;
+	double temp;
+	double dist2;
+	int i;
+
+	// first zero first term of neighbor list
+	for (atom1=0;atom1<nAtoms;atom1++) {
+		neighborList[atom1][0] = 0;
+	}
+
+	// populate neighbor list
+	for (atom1=0;atom1<nAtoms-1;atom1++) {
+		for (atom2=atom1+1;atom2<nAtoms;atom2++) {
+
+			// compute the distance between the atoms
+			dist2 = 0;
+			for (i=0;i<3;i++) {
+				temp = coord[atom1][i]-coord[atom2][i];
+				// check periodic boundaries
+				if (temp< -box/2.0) {
+					temp += box;
+				} else if (temp > box/2.0) {
+					temp -= box;
+				}
+				dist2 += temp*temp;
+			}
+			if (dist2<neighborDist2) {
+				neighborList[atom1][0]++;
+				neighborList[atom2][0]++;
+				neighborList[atom1][neighborList[atom1][0]] = atom2;
+				neighborList[atom2][neighborList[atom2][0]] = atom1;
+			}
+
+		}
+
+	}
+
+}
+
+
+
 double sum(double* array, int dim) {
 
 	double temp;
@@ -163,23 +222,26 @@ double sum(double* array, int dim) {
 	return temp;
 }
 
-void atom_pair_energy(double **coord, int nAtoms, double box, int atom, double *atomEnergy, double rCut2) {
+void atom_pair_energy(double **coord, int nAtoms, double box, int atom, double rCut2, double *atomEnergy, int **neighborList) {
 
 	int atom2;
 	double dist2;
 	double temp;
-	int i;
+	int i, j;
 
 	for (atom2=0;atom2<nAtoms;atom2++) {
 		atomEnergy[atom2]=0;
+	}
 
+	for (j=1;j<=neighborList[atom][0];j++) {
+		atom2 = neighborList[atom][j];
 		if (atom2 != atom) {
-			// compute distance between atom1 and atom2
-			dist2=0;
+			// compute the distance between the atoms
+			dist2 = 0;
 			for (i=0;i<3;i++) {
 				temp = coord[atom][i]-coord[atom2][i];
-				// apply periodic boundary conditions (cubic box)
-				if (temp < -box/2.0) {
+				// check periodic boundaries
+				if (temp< -box/2.0) {
 					temp += box;
 				} else if (temp > box/2.0) {
 					temp -= box;
@@ -196,7 +258,7 @@ void atom_pair_energy(double **coord, int nAtoms, double box, int atom, double *
 
 }
 
-double total_pair_energy(double **coord, int nAtoms, double box, double** atomEnergy, double rCut2) {
+double total_pair_energy(double **coord, int nAtoms, double box, double** atomEnergy, double rCut2, int **neighborList) {
 
 	int atom1;
 	int atom2;
@@ -205,28 +267,34 @@ double total_pair_energy(double **coord, int nAtoms, double box, double** atomEn
 	double dist2;
 	double temp;
 	int i;
+	int j;
 
 	energy=0;
 	for (atom1=0;atom1<nAtoms-1;atom1++) {
 
-		for (atom2=atom1+1;atom2<nAtoms;atom2++) {
-			// compute distance between atom1 and atom2
-			dist2=0;
-			for (i=0;i<3;i++) {
-				temp = coord[atom1][i]-coord[atom2][i];
-				// apply periodic boundary conditions (cubic box)
-				if (temp < -box/2.0) {
-					temp += box;
-				} else if (temp > box/2.0) {
-					temp -= box;
+		for (j=1;j<=neighborList[atom1][0];j++) {
+			atom2 = neighborList[atom1][j];
+
+			if (atom2>atom1) {
+
+				// compute the distance between the atoms
+				dist2 = 0;
+				for (i=0;i<3;i++) {
+					temp = coord[atom1][i]-coord[atom2][i];
+					// check periodic boundaries
+					if (temp< -box/2.0) {
+						temp += box;
+					} else if (temp > box/2.0) {
+						temp -= box;
+					}
+					dist2 += temp*temp;
 				}
-				dist2 += temp*temp;
-			}
-			if (dist2<rCut2) {
-				tempE = lennard_jones(dist2);		
-				energy += tempE;
-				atomEnergy[atom1][atom2] = tempE;
-				atomEnergy[atom2][atom1] = tempE;
+				if (dist2<rCut2) {
+					tempE = lennard_jones(dist2);		
+					energy += tempE;
+					atomEnergy[atom1][atom2] = tempE;
+					atomEnergy[atom2][atom1] = tempE;
+				}
 			}
 
 		}
@@ -239,8 +307,10 @@ double total_pair_energy(double **coord, int nAtoms, double box, double** atomEn
 
 double lennard_jones(double dist2) {
 
+	double temp;
 	double energy;
 	double dist6;
+	int i;
 
 	dist6 = dist2*dist2*dist2;
 
@@ -298,13 +368,14 @@ void init_positions(double **coord, int nAtoms, double *box) {
 	}
 }		
 
-void read_cfg_file(int *nAtoms, double *temp, double *box, char *trajFileName, char *logFileName, int *nIter, int *deltaWrite, double *deltaX, double *rCut2) {
+void read_cfg_file(int *nAtoms, double *temp, double *box, char *trajFileName, char *logFileName, int *nIter, int *deltaWrite, double *deltaX, double *rCut2, double *neighborDist2, int *neighborUpdate) {
 
 	char buffer[1024];
 	char tempBuffer[1024];
 	char check[15];
 	char *firstWord;
 	double rCut;
+	double neighborDist;
 
 	while (fgets(buffer,1024,stdin) != NULL) {
 
@@ -322,8 +393,11 @@ void read_cfg_file(int *nAtoms, double *temp, double *box, char *trajFileName, c
 		} else if (strncmp(firstWord,"rCut",4)==0) {
 			rCut = atof(string_secondword(buffer));
 			*rCut2 = rCut*rCut;
-//		} else if (strncmp(firstWord,"box",3)==0) {
-//			*box = atof(string_secondword(buffer));
+		} else if (strncmp(firstWord,"neighborDist",12)==0) {
+			neighborDist = atof(string_secondword(buffer));
+			*neighborDist2 = neighborDist*neighborDist;
+		} else if (strncmp(firstWord,"neighborUpdate",14)==0) {
+			*neighborUpdate = atoi(string_secondword(buffer));
 		} else if (strncmp(firstWord,"deltaX",6)==0) {
 			*deltaX = atof(string_secondword(buffer));
 		} else if (strncmp(firstWord,"trajFile",8)==0) {
@@ -344,7 +418,8 @@ void read_cfg_file(int *nAtoms, double *temp, double *box, char *trajFileName, c
 	printf("deltaWrite: %d\n",*deltaWrite);
 //	printf("box dimension: %f\n", *box);
 	printf("deltaX (MC translation): %f\n", *deltaX);
-	printf("cutoff: %f\n",rCut);
+	printf("cutoff distance: %f\n",rCut);
+	printf("neighbor list distance: %f\n",neighborDist);
 
 
 }
