@@ -26,6 +26,7 @@
 
 # My backups
 *.OLD
+*.BAK
 
 # data files
 *.dat
