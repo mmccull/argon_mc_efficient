@@ -5,12 +5,12 @@
 #include "stringlib.h"
 
 // Declare Subroutines
-void read_cfg_file(int *, double *, double *, char *, char *, int *, int *, double *);
+void read_cfg_file(int *, double *, double *, char *, char *, int *, int *, double *, double *);
 void write_xyz_step(double **, int, int, double, FILE *);
 void init_positions(double **, int, double *);
-double total_pair_energy(double **, int, double, double**);
-void atom_pair_energy(double **, int, double, int, double *);
-double lennard_jones(double *, double *, double);
+double total_pair_energy(double **, int, double, double**,double);
+void atom_pair_energy(double **, int, double, int, double *, double);
+double lennard_jones(double);
 double sum(double*, int);
 
 static double kB = 1.9872041E-3; // actually R in units of kcal/mol/K
@@ -47,6 +47,8 @@ int main() {
 	FILE *xyzOut;
 	FILE *logOut;      // log output file
 
+	double rCut2;
+
 	time_t startTime;   // initial clock time
 	time_t stopTime;    // final clock time
 	time_t routineStartTime; // start time for a routine
@@ -58,7 +60,7 @@ int main() {
 	startTime = clock();
 
 	// read config data from standard in
-	read_cfg_file(&nAtoms, &temp, &box, trajFileName, logFileName, &nIter, &deltaWrite, &deltaX);
+	read_cfg_file(&nAtoms, &temp, &box, trajFileName, logFileName, &nIter, &deltaWrite, &deltaX, &rCut2);
 	kBT = kB*temp;
 	printf("kB*T=%f\n",kBT);
 
@@ -75,7 +77,7 @@ int main() {
 	init_positions(coord,nAtoms,&box);
 
 	// Compute energy of system
-	energy = total_pair_energy(coord,nAtoms,box,atomEnergy);
+	energy = total_pair_energy(coord,nAtoms,box,atomEnergy,rCut2);
 
 	xyzOut = fopen(trajFileName,"w");
 	logOut = fopen(logFileName,"w");
@@ -101,9 +103,9 @@ int main() {
 			delta[i] = deltaX*(rand()/((double) RAND_MAX)-0.5);
 			coord[atom][i] += delta[i];
 		}
-		// compute new energy
+		// compute new energy for specific atom
 		routineStartTime=clock();
-		atom_pair_energy(coord,nAtoms,box,atom,newEnergy);
+		atom_pair_energy(coord,nAtoms,box,atom,newEnergy,rCut2);
 		routineStopTime=clock();
 		energyCalcTime += (double)(routineStopTime-routineStartTime)/CLOCKS_PER_SEC;
 
@@ -161,15 +163,32 @@ double sum(double* array, int dim) {
 	return temp;
 }
 
-void atom_pair_energy(double **coord, int nAtoms, double box, int atom, double *atomEnergy) {
+void atom_pair_energy(double **coord, int nAtoms, double box, int atom, double *atomEnergy, double rCut2) {
 
 	int atom2;
+	double dist2;
+	double temp;
+	int i;
 
-	atomEnergy[atom]=0;
 	for (atom2=0;atom2<nAtoms;atom2++) {
+		atomEnergy[atom2]=0;
 
 		if (atom2 != atom) {
-			atomEnergy[atom2] = lennard_jones(coord[atom],coord[atom2],box);		
+			// compute distance between atom1 and atom2
+			dist2=0;
+			for (i=0;i<3;i++) {
+				temp = coord[atom][i]-coord[atom2][i];
+				// apply periodic boundary conditions (cubic box)
+				if (temp < -box/2.0) {
+					temp += box;
+				} else if (temp > box/2.0) {
+					temp -= box;
+				}
+				dist2 += temp*temp;
+			}
+			if (dist2<rCut2) {
+				atomEnergy[atom2] = lennard_jones(dist2);		
+			}
 		}
 
 	}
@@ -177,22 +196,38 @@ void atom_pair_energy(double **coord, int nAtoms, double box, int atom, double *
 
 }
 
-double total_pair_energy(double **coord, int nAtoms, double box, double** atomEnergy) {
+double total_pair_energy(double **coord, int nAtoms, double box, double** atomEnergy, double rCut2) {
 
 	int atom1;
 	int atom2;
 	double energy;
 	double tempE;
+	double dist2;
+	double temp;
+	int i;
 
 	energy=0;
 	for (atom1=0;atom1<nAtoms-1;atom1++) {
 
 		for (atom2=atom1+1;atom2<nAtoms;atom2++) {
-
-			tempE = lennard_jones(coord[atom1],coord[atom2],box);		
-			energy += tempE;
-			atomEnergy[atom1][atom2] = tempE;
-			atomEnergy[atom2][atom1] = tempE;
+			// compute distance between atom1 and atom2
+			dist2=0;
+			for (i=0;i<3;i++) {
+				temp = coord[atom1][i]-coord[atom2][i];
+				// apply periodic boundary conditions (cubic box)
+				if (temp < -box/2.0) {
+					temp += box;
+				} else if (temp > box/2.0) {
+					temp -= box;
+				}
+				dist2 += temp*temp;
+			}
+			if (dist2<rCut2) {
+				tempE = lennard_jones(dist2);		
+				energy += tempE;
+				atomEnergy[atom1][atom2] = tempE;
+				atomEnergy[atom2][atom1] = tempE;
+			}
 
 		}
 
@@ -202,26 +237,11 @@ double total_pair_energy(double **coord, int nAtoms, double box, double** atomEn
 
 }
 
-double lennard_jones(double *pos1, double *pos2, double box) {
+double lennard_jones(double dist2) {
 
-	double dist2;
-	double temp;
 	double energy;
 	double dist6;
-	int i;
 
-	// compute the distance between the atoms
-	dist2 = 0;
-	for (i=0;i<3;i++) {
-		temp = pos1[i]-pos2[i];
-		// check periodic boundaries
-		if (temp< -box/2.0) {
-			temp += box;
-		} else if (temp > box/2.0) {
-			temp -= box;
-		}
-		dist2 += temp*temp;
-	}
 	dist6 = dist2*dist2*dist2;
 
 	// compute the energy
@@ -278,13 +298,13 @@ void init_positions(double **coord, int nAtoms, double *box) {
 	}
 }		
 
-void read_cfg_file(int *nAtoms, double *temp, double *box, char *trajFileName, char *logFileName, int *nIter, int *deltaWrite, double *deltaX) {
+void read_cfg_file(int *nAtoms, double *temp, double *box, char *trajFileName, char *logFileName, int *nIter, int *deltaWrite, double *deltaX, double *rCut2) {
 
 	char buffer[1024];
 	char tempBuffer[1024];
 	char check[15];
 	char *firstWord;
-	double *rCut;
+	double rCut;
 
 	while (fgets(buffer,1024,stdin) != NULL) {
 
@@ -299,8 +319,9 @@ void read_cfg_file(int *nAtoms, double *temp, double *box, char *trajFileName, c
 			*deltaWrite = atoi(string_secondword(buffer));
 		} else if (strncmp(firstWord,"temperature",11)==0) {
 			*temp = atof(string_secondword(buffer));
-//		} else if (strncmp(firstWord,"rcut",4)==0) {
-//			*rCut = atof(string_secondword(buffer));
+		} else if (strncmp(firstWord,"rCut",4)==0) {
+			rCut = atof(string_secondword(buffer));
+			*rCut2 = rCut*rCut;
 //		} else if (strncmp(firstWord,"box",3)==0) {
 //			*box = atof(string_secondword(buffer));
 		} else if (strncmp(firstWord,"deltaX",6)==0) {
@@ -323,7 +344,7 @@ void read_cfg_file(int *nAtoms, double *temp, double *box, char *trajFileName, c
 	printf("deltaWrite: %d\n",*deltaWrite);
 //	printf("box dimension: %f\n", *box);
 	printf("deltaX (MC translation): %f\n", *deltaX);
-//	printf("cutoff: %f\n",*rCut);
+	printf("cutoff: %f\n",rCut);
 
 
 }
