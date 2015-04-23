@@ -7,6 +7,6 @@ OPTS = -O3 -ftree-vectorize
 
 mc: liquid_argon_mc.c stringlib.c stringlib.h
 	$(CC) -c  liquid_argon_mc.c stringlib.c $(OPTS) 
-	$(CC) liquid_argon_mc.o stringlib.o $(OPTS) -o liquid_argon_mc.x
+	$(CC) liquid_argon_mc.o stringlib.o $(OPTS) -o liquid_argon_mc.nlist.x
 #	cp sasa_force.x ../3app
 
